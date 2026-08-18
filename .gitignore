@@ -7,3 +7,10 @@ dist/
 *.log
 .idea/
 .vscode/
+.venv/
+backend/dist/
+frontend/dist/
+*.tsbuildinfo
+.turbo/
+tmp/
+.cache/

@@ -1,0 +1,9 @@
+packages:
+  - shared
+  - backend
+  - frontend
+
+allowBuilds:
+  '@google/genai': false
+  esbuild: true
+  protobufjs: false

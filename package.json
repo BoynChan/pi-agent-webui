@@ -1,0 +1,25 @@
+{
+  "name": "pi-agent-webui",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local debug harness for PI Agent — DeepSeek-Harness-inspired sessions, chat, plugins, and trajectory.",
+  "type": "module",
+  "workspaces": [
+    "shared",
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n backend,frontend -c cyan,magenta \"pnpm --dir backend dev\" \"pnpm --dir frontend dev\"",
+    "dev:backend": "pnpm --dir backend dev",
+    "dev:frontend": "pnpm --dir frontend dev",
+    "build": "pnpm --dir backend build && pnpm --dir frontend build",
+    "typecheck": "pnpm --dir shared typecheck && pnpm --dir backend typecheck && pnpm --dir frontend typecheck"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

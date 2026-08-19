@@ -20,7 +20,7 @@ const EVENT_FILTERS: Array<{ id: TrajectoryEventType | "all"; label: string }> =
   { id: "skill_load", label: "Skill" },
   { id: "tool_call", label: "Tool" },
   { id: "tool_result", label: "Result" },
-  { id: "context", label: "SCP" },
+  { id: "context", label: "Prompt" },
   { id: "error", label: "Error" },
 ];
 
@@ -178,6 +178,7 @@ function TrajectoryTab() {
   const highlightMessage = useAppStore((s) => s.highlightMessage);
   const setInspectorTab = useAppStore((s) => s.setInspectorTab);
   const [filter, setFilter] = useState<TrajectoryEventType | "all">("all");
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const visible = events.filter((e) => filter === "all" || e.type === filter || related(filter, e.type));
 
@@ -215,35 +216,71 @@ function TrajectoryTab() {
             session.
           </p>
         ) : (
-          visible.map((event) => (
-            <button
-              key={event.id}
-              type="button"
-              onClick={() => {
-                if (event.messageId) highlightMessage(event.messageId);
-              }}
-              className={`lane lane-${event.type} mb-2 w-full rounded-[3px] bg-inset/60 px-2 py-1.5 text-left hover:bg-inset`}
-            >
-              <div className="flex items-baseline justify-between gap-2">
-                <span className="font-mono text-[10px] uppercase tracking-wide text-mute">{event.type}</span>
-                <span className="font-mono text-[10px] text-faint">{clock(event.ts)}</span>
-              </div>
-              <div className="text-[12.5px]">{event.title}</div>
-              {event.detail ? (
-                <div className="mt-0.5 line-clamp-3 font-mono text-[11px] text-mute">{event.detail}</div>
-              ) : null}
-            </button>
-          ))
+          visible.map((event) => {
+            const expanded = expandedId === event.id;
+            const turn = turnNumber(event);
+            return (
+              <button
+                key={event.id}
+                type="button"
+                onClick={() => {
+                  setExpandedId(expanded ? null : event.id);
+                  if (event.messageId) highlightMessage(event.messageId);
+                }}
+                className={`lane lane-${event.type} mb-2 w-full rounded-[3px] bg-inset/60 px-2 py-1.5 text-left hover:bg-inset ${
+                  expanded ? "ring-1 ring-scope/30" : ""
+                }`}
+              >
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="font-mono text-[10px] uppercase tracking-wide text-mute">
+                    {event.type}
+                    {turn != null ? ` · turn ${turn}` : ""}
+                  </span>
+                  <span className="font-mono text-[10px] text-faint">{clock(event.ts)}</span>
+                </div>
+                <div className="text-[12.5px]">{event.title}</div>
+                {event.detail && !expanded ? (
+                  <div className="mt-0.5 line-clamp-4 font-mono text-[11px] text-mute">{event.detail}</div>
+                ) : null}
+                {expanded ? (
+                  <pre className="mt-1.5 max-h-96 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-mute">
+                    {expandedBody(event)}
+                  </pre>
+                ) : null}
+              </button>
+            );
+          })
         )}
       </div>
       <p className="border-t border-hair px-3 py-2 font-mono text-[10px] text-faint">
-        Click a row to flash the chat block.{" "}
+        Click a row to expand it (system prompt is under Prompt).{" "}
         <button type="button" className="text-scope" onClick={() => setInspectorTab("plugins")}>
           Plugins
         </button>
       </p>
     </div>
   );
+}
+
+function expandedBody(event: TrajectoryEvent): string {
+  const payload = event.payload;
+  if (payload && typeof payload === "object") {
+    const record = payload as Record<string, unknown>;
+    if (record.message !== undefined) {
+      return JSON.stringify(record.message, null, 2);
+    }
+    if (typeof record.thinking === "string" && record.thinking.length > 0) {
+      return record.thinking;
+    }
+  }
+  return event.detail ?? "";
+}
+
+function turnNumber(event: TrajectoryEvent): number | undefined {
+  const payload = event.payload;
+  if (!payload || typeof payload !== "object" || !("turn" in payload)) return undefined;
+  const turn = (payload as { turn?: unknown }).turn;
+  return typeof turn === "number" && turn > 0 ? turn : undefined;
 }
 
 function related(filter: TrajectoryEventType | "all", type: TrajectoryEventType): boolean {

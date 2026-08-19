@@ -87,7 +87,7 @@ function MessageList() {
         <ul className="mt-6 space-y-2 font-mono text-[12px] text-mute">
           <li>1. Optional: open Connectors and add an OpenAI-compatible or Anthropic endpoint.</li>
           <li>2. Send a prompt. PI Agent runs against this workspace with the selected connector.</li>
-          <li>3. Click a trajectory row to flash the matching chat block.</li>
+          <li>3. Open Trajectory and click a row to expand it — system prompt is the Prompt event.</li>
         </ul>
       </div>
     );
@@ -146,7 +146,13 @@ function ToolCard({ call }: { call: ToolCallCard }) {
   const [open, setOpen] = useState(false);
   const args = summarize(call.args);
   return (
-    <div className="mt-2 rounded-[3px] border border-copper/35 bg-inset">
+    <div
+      className={`mt-2 rounded-[3px] bg-inset ${
+        call.status === "running" || call.status === "pending"
+          ? "tool-card-running"
+          : "border border-copper/35"
+      }`}
+    >
       <button type="button" className="flex w-full items-center gap-2 px-3 py-2 text-left" onClick={() => setOpen((v) => !v)}>
         <span className="font-mono text-[11px] text-copper">{call.name}</span>
         <span className="truncate font-mono text-[11px] text-mute">{args}</span>

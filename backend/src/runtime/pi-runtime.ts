@@ -258,15 +258,6 @@ export class PiAgentRuntime implements AgentRuntime {
     this.session.agent.state.messages = historyToAgentMessages(input.messages);
 
     const skills = this.resourceLoader?.getSkills().skills ?? [];
-    pump.push(
-      emitTraj("context", "Injected PI system prompt (skills + AGENTS.md + tools)", {
-        detail: `${skills.length} skills · cwd ${this.cwd}`,
-        payload: {
-          skillNames: skills.map((s) => s.name),
-          tools: this.session.getActiveToolNames(),
-        },
-      }),
-    );
     pump.push(emitTraj("turn_start", "Turn opened"));
 
     if (prompt.startsWith("/skill:")) {
@@ -281,12 +272,16 @@ export class PiAgentRuntime implements AgentRuntime {
     let assistantId: string | undefined;
     let assistant: ChatMessage | undefined;
     const toolCards = new Map<string, ToolCallCard>();
+    const loop = { turn: 0 };
 
     const unsubscribe = this.session.subscribe((event) => {
       mapSessionEvent(event, {
         emit: (runtimeEvent) => pump.push(runtimeEvent),
         emitTraj,
         skills: skills.map((s) => ({ name: s.name, filePath: s.filePath })),
+        getSystemPrompt: () => this.session?.systemPrompt ?? "",
+        cwd: this.cwd,
+        loop,
         get assistantId() {
           return assistantId;
         },
@@ -469,6 +464,9 @@ interface MapContext {
   emit: (event: RuntimeEvent) => void;
   emitTraj: (type: TrajectoryEventType, title: string, extra?: Partial<TrajectoryEvent>) => RuntimeEvent;
   skills: Array<{ name: string; filePath: string }>;
+  getSystemPrompt: () => string;
+  cwd: string;
+  loop: { turn: number };
   readonly assistantId: string | undefined;
   setAssistant: (message: ChatMessage) => void;
   assistant: ChatMessage | undefined;
@@ -477,12 +475,46 @@ interface MapContext {
 
 function mapSessionEvent(event: AgentSessionEvent, ctx: MapContext): void {
   switch (event.type) {
-    case "turn_start":
-      ctx.emit(ctx.emitTraj("turn_start", "PI turn"));
+    case "agent_start": {
+      ctx.loop.turn = 0;
+      const systemPrompt = ctx.getSystemPrompt();
+      ctx.emit(
+        ctx.emitTraj("context", "System prompt", {
+          detail: systemPrompt || "(empty system prompt)",
+          payload: {
+            chars: systemPrompt.length,
+            cwd: ctx.cwd,
+            skillNames: ctx.skills.map((s) => s.name),
+          },
+        }),
+      );
       return;
-    case "turn_end":
-      ctx.emit(ctx.emitTraj("turn_end", "PI turn closed"));
+    }
+    case "turn_start": {
+      ctx.loop.turn += 1;
+      const turn = ctx.loop.turn;
+      ctx.emit(
+        ctx.emitTraj("turn_start", `PI turn ${turn}`, {
+          detail: `Turn ${turn} — one model response plus any tools in this step`,
+          payload: { turn },
+        }),
+      );
       return;
+    }
+    case "turn_end": {
+      const turn = ctx.loop.turn;
+      const toolCount = event.toolResults?.length ?? 0;
+      ctx.emit(
+        ctx.emitTraj("turn_end", `PI turn ${turn} ended`, {
+          detail:
+            toolCount > 0
+              ? `Turn ${turn} closed after ${toolCount} tool result${toolCount === 1 ? "" : "s"}`
+              : `Turn ${turn} closed — no tools`,
+          payload: { turn, toolCount },
+        }),
+      );
+      return;
+    }
     case "message_start": {
       if (event.message.role !== "assistant") return;
       const message: ChatMessage = {
@@ -521,11 +553,21 @@ function mapSessionEvent(event: AgentSessionEvent, ctx: MapContext): void {
         toolCalls: ctx.assistant.toolCalls ?? [],
       };
       if (thinking) {
-        ctx.emit(ctx.emitTraj("thinking", "Reasoning", { messageId: ended.id, detail: `${thinking.length} chars` }));
+        ctx.emit(
+          ctx.emitTraj("thinking", "Reasoning", {
+            messageId: ended.id,
+            detail: turnDetail(ctx, `${thinking.length} chars`),
+            payload: { turn: ctx.loop.turn, thinking },
+          }),
+        );
       }
-      if (text) {
-        ctx.emit(ctx.emitTraj("text", "Assistant text", { messageId: ended.id, detail: `${text.length} chars` }));
-      }
+      ctx.emit(
+        ctx.emitTraj("text", "Assistant text", {
+          messageId: ended.id,
+          detail: turnDetail(ctx, text ? `${text.length} chars` : "no text · tool-only"),
+          payload: { turn: ctx.loop.turn, message: jsonSafe(event.message) },
+        }),
+      );
       ctx.emit({ type: "message_end", message: ended });
       return;
     }
@@ -539,13 +581,20 @@ function mapSessionEvent(event: AgentSessionEvent, ctx: MapContext): void {
       };
       ctx.toolCards.set(event.toolCallId, card);
       if (messageId) ctx.emit({ type: "tool_call", messageId, toolCall: { ...card } });
-      ctx.emit(ctx.emitTraj("tool_call", event.toolName, { messageId, payload: event.args }));
+      ctx.emit(
+        ctx.emitTraj("tool_call", event.toolName, {
+          messageId,
+          detail: turnDetail(ctx, event.toolName),
+          payload: { turn: ctx.loop.turn, args: event.args },
+        }),
+      );
       const path = toolPath(event.args);
       if (path && isSkillPath(path, ctx.skills)) {
         ctx.emit(
           ctx.emitTraj("skill_load", `Read skill file ${path}`, {
             messageId,
-            payload: { path },
+            detail: turnDetail(ctx, path),
+            payload: { turn: ctx.loop.turn, path },
           }),
         );
       }
@@ -568,13 +617,32 @@ function mapSessionEvent(event: AgentSessionEvent, ctx: MapContext): void {
       ctx.emit(
         ctx.emitTraj("tool_result", `${event.toolName} → ${card.status}`, {
           messageId,
-          detail: snippet,
+          detail: turnDetail(ctx, snippet),
+          payload: { turn: ctx.loop.turn },
         }),
       );
       return;
     }
     default:
       return;
+  }
+}
+
+function turnDetail(ctx: MapContext, text: string): string {
+  return ctx.loop.turn > 0 ? `turn ${ctx.loop.turn} · ${text}` : text;
+}
+
+function jsonSafe(value: unknown): unknown {
+  try {
+    return JSON.parse(
+      JSON.stringify(value, (_key, item) => {
+        if (typeof item === "bigint") return item.toString();
+        if (typeof item === "function" || typeof item === "undefined") return undefined;
+        return item;
+      }),
+    );
+  } catch {
+    return { error: "Could not serialize value" };
   }
 }
 

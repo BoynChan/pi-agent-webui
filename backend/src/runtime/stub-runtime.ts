@@ -101,9 +101,10 @@ export class StubRuntime implements AgentRuntime {
       yield { type: "run_start", runId, ts };
       yield emitTraj("run_start", "Run started", { ts, payload: { runtime: this.name } });
       yield emitTraj("turn_start", "Turn opened", { ts });
-      yield emitTraj("context", "Injected skill catalog + system prompt", {
-        detail: "SCP packets: skill-catalog, workspace-facts. Model-visible means recorded.",
-        payload: { packets: ["skill-catalog", "workspace-facts"] },
+      const systemPrompt = input.systemPrompt ?? defaultSystemPrompt(this);
+      yield emitTraj("context", "System prompt", {
+        detail: systemPrompt,
+        payload: { chars: systemPrompt.length, packets: ["skill-catalog", "workspace-facts"] },
       });
 
       if (!input.provider?.apiKey) {

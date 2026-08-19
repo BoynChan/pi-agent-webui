@@ -146,6 +146,42 @@ select {
   margin: 1em 0 0.4em;
 }
 
+.tool-card-running {
+  border: 1px solid transparent;
+  background-image:
+    linear-gradient(var(--color-inset), var(--color-inset)),
+    linear-gradient(
+      90deg,
+      rgb(201 132 58 / 0.18) 0%,
+      rgb(201 132 58 / 0.45) 28%,
+      #f0c27a 50%,
+      rgb(201 132 58 / 0.45) 72%,
+      rgb(201 132 58 / 0.18) 100%
+    );
+  background-origin: border-box;
+  background-clip: padding-box, border-box;
+  background-size: auto, 240% 100%;
+  animation: copper-border-sweep 1.35s linear infinite;
+}
+
+@keyframes copper-border-sweep {
+  from {
+    background-position: 0 0, 100% 0;
+  }
+  to {
+    background-position: 0 0, -100% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-card-running {
+    animation: none;
+    background-image:
+      linear-gradient(var(--color-inset), var(--color-inset)),
+      linear-gradient(var(--color-copper), var(--color-copper));
+  }
+}
+
 .flash-hit {
   animation: flash 1.2s ease;
 }

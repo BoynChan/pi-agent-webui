@@ -9,6 +9,7 @@ import type {
 } from "@pi-debug/shared";
 import { fetchHealth, fetchPlugin, fetchPlugins, reloadPlugins, stopRun, streamRun } from "../lib/api";
 import { mergePlugins, providerWire } from "../lib/catalog";
+import { stampEventRound } from "../lib/rounds";
 import {
   deleteSession,
   loadProviders,
@@ -43,6 +44,7 @@ export interface AppState {
   streaming: boolean;
   streamError: string | null;
   highlightMessageId: string | null;
+  highlightTrajectoryId: string | null;
   selectedPluginId: string | null;
   sidebarWidth: number;
   inspectorWidth: number;
@@ -60,8 +62,10 @@ export interface AppState {
   setActiveProvider: (id: string | null) => void;
   openPlugin: (id: string) => Promise<void>;
   send: (text: string) => Promise<void>;
+  retry: (messageId: string, content?: string) => Promise<void>;
   stop: () => Promise<void>;
   highlightMessage: (id: string | null) => void;
+  jumpToTrajectory: (id: string | null) => void;
 }
 
 function metaOf(record: SessionRecord): SessionMeta {
@@ -153,7 +157,7 @@ function applyEvent(record: SessionRecord, event: RuntimeEvent): SessionRecord {
       }));
       break;
     case "trajectory": {
-      next.trajectory.push(event.event);
+      next.trajectory.push(stampEventRound(event.event, next.messages));
       if (event.event.messageId) {
         patchMessage(event.event.messageId, (m) => ({
           ...m,
@@ -163,14 +167,19 @@ function applyEvent(record: SessionRecord, event: RuntimeEvent): SessionRecord {
       break;
     }
     case "error":
-      next.trajectory.push({
-        id: uid("tr"),
-        type: "error",
-        ts: Date.now(),
-        runId: "client",
-        title: "Stream error",
-        detail: event.message,
-      });
+      next.trajectory.push(
+        stampEventRound(
+          {
+            id: uid("tr"),
+            type: "error",
+            ts: Date.now(),
+            runId: "client",
+            title: "Stream error",
+            detail: event.message,
+          },
+          next.messages,
+        ),
+      );
       break;
     default:
       break;
@@ -199,6 +208,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   streaming: false,
   streamError: null,
   highlightMessageId: null,
+  highlightTrajectoryId: null,
   selectedPluginId: null,
   sidebarWidth: 260,
   inspectorWidth: 360,
@@ -413,7 +423,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       trajectoryIds: [],
     };
     const titled = current.messages.length === 0 ? titleFrom(trimmed) : current.title;
-    const seeded: SessionRecord = {
+    await executeRun(get, set, {
       ...current,
       title: titled,
       messages: [...current.messages, user],
@@ -421,45 +431,31 @@ export const useAppStore = create<AppState>((set, get) => ({
       preview: trimmed.slice(0, 80),
       pluginSnapshot: get().plugins,
       providerId: get().activeProviderId,
+    });
+  },
+
+  retry: async (messageId, content) => {
+    if (get().streaming) await get().stop();
+    const current = get().current;
+    if (!current) return;
+    const idx = current.messages.findIndex((message) => message.id === messageId && message.role === "user");
+    if (idx < 0) return;
+    const user = current.messages[idx];
+    if (!user) return;
+    const nextContent = (content ?? user.content).trim();
+    if (!nextContent) return;
+    const patched: SessionRecord = {
+      ...current,
+      title: idx === 0 ? titleFrom(nextContent) : current.title,
+      messages: current.messages.map((message, index) =>
+        index === idx ? { ...message, content: nextContent } : message,
+      ),
     };
-    const sessions = get().sessions.map((s) => (s.id === seeded.id ? metaOf(seeded) : s));
-    set({ current: seeded, sessions, streaming: true, streamError: null });
-    await persistCurrent(seeded, sessions);
-
-    const provider = get().providers.find((p) => p.id === get().activeProviderId);
-    const controller = new AbortController();
-    runAbort = controller;
-
-    try {
-      let live = seeded;
-      for await (const event of streamRun(
-        seeded.id,
-        {
-          sessionId: seeded.id,
-          messages: seeded.messages,
-          provider: providerWire(provider),
-        },
-        controller.signal,
-      )) {
-        if (event.type === "error") {
-          set({ streamError: event.message });
-        }
-        live = applyEvent(live, event);
-        const nextSessions = get().sessions.map((s) => (s.id === live.id ? metaOf(live) : s));
-        set({ current: live, sessions: nextSessions });
-      }
-      await persistCurrent(live, get().sessions.map((s) => (s.id === live.id ? metaOf(live) : s)));
-    } catch (error) {
-      if ((error as { name?: string }).name !== "AbortError") {
-        set({ streamError: error instanceof Error ? error.message : String(error) });
-      }
-    } finally {
-      runAbort = null;
-      set({ streaming: false });
-    }
+    await executeRun(get, set, truncateForRetry(patched, idx));
   },
 
   stop: async () => {
+    runGeneration += 1;
     const id = get().currentId;
     runAbort?.abort();
     if (id) await stopRun(id).catch(() => undefined);
@@ -467,16 +463,105 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   highlightMessage: (id) => {
-    set({ highlightMessageId: id });
+    flashSeq += 1;
+    const seq = flashSeq;
+    set({ highlightMessageId: null });
+    if (!id) return;
+    window.requestAnimationFrame(() => {
+      if (flashSeq !== seq) return;
+      set({ highlightMessageId: id });
+      window.setTimeout(() => {
+        if (flashSeq === seq && get().highlightMessageId === id) set({ highlightMessageId: null });
+      }, 1400);
+    });
+  },
+
+  jumpToTrajectory: (id) => {
+    set({ highlightTrajectoryId: id, inspectorTab: "trajectory" });
+    persistUi(get);
     if (id) {
       window.setTimeout(() => {
-        if (get().highlightMessageId === id) set({ highlightMessageId: null });
-      }, 1400);
+        if (get().highlightTrajectoryId === id) set({ highlightTrajectoryId: null });
+      }, 1600);
     }
   },
 }));
 
 let runAbort: AbortController | null = null;
+let runGeneration = 0;
+let flashSeq = 0;
+
+function truncateForRetry(record: SessionRecord, userIndex: number): SessionRecord {
+  const user = record.messages[userIndex];
+  if (!user) return record;
+  const prior = record.messages.slice(0, userIndex);
+  const priorIds = new Set(prior.map((message) => message.id));
+  return {
+    ...record,
+    messages: [
+      ...prior,
+      { ...user, trajectoryIds: [], thinking: undefined, toolCalls: undefined },
+    ],
+    trajectory: record.trajectory.filter((event) => {
+      if (event.messageId) return priorIds.has(event.messageId);
+      return event.ts < user.createdAt;
+    }),
+    updatedAt: Date.now(),
+    preview: user.content.replace(/\s+/g, " ").slice(0, 80),
+    pluginSnapshot: record.pluginSnapshot,
+  };
+}
+
+async function executeRun(
+  get: () => AppState,
+  set: (partial: Partial<AppState> | ((state: AppState) => Partial<AppState>)) => void,
+  seeded: SessionRecord,
+): Promise<void> {
+  const seq = ++runGeneration;
+  const sessions = get().sessions.map((s) => (s.id === seeded.id ? metaOf(seeded) : s));
+  set({ current: seeded, sessions, streaming: true, streamError: null });
+  await persistCurrent(seeded, sessions);
+
+  const provider = get().providers.find((p) => p.id === get().activeProviderId);
+  const controller = new AbortController();
+  runAbort = controller;
+
+  try {
+    let live = seeded;
+    for await (const event of streamRun(
+      seeded.id,
+      {
+        sessionId: seeded.id,
+        messages: seeded.messages,
+        provider: providerWire(provider),
+      },
+      controller.signal,
+    )) {
+      if (runGeneration !== seq) return;
+      if (event.type === "error") {
+        set({ streamError: event.message });
+      }
+      live = applyEvent(live, event);
+      const nextSessions = get().sessions.map((s) => (s.id === live.id ? metaOf(live) : s));
+      set({ current: live, sessions: nextSessions });
+    }
+    if (runGeneration !== seq) return;
+    await persistCurrent(
+      live,
+      get().sessions.map((s) => (s.id === live.id ? metaOf(live) : s)),
+    );
+  } catch (error) {
+    if (runGeneration !== seq) return;
+    if ((error as { name?: string }).name !== "AbortError") {
+      set({ streamError: error instanceof Error ? error.message : String(error) });
+    }
+  } finally {
+    if (runGeneration === seq) {
+      runAbort = null;
+      set({ streaming: false });
+    }
+  }
+}
 
 function newSession(providerId: string | null): SessionRecord {
   const ts = Date.now();

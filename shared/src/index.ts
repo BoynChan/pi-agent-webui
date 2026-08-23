@@ -69,6 +69,7 @@ export type TrajectoryEventType =
   | "turn_end"
   | "thinking"
   | "text"
+  | "user"
   | "skill_load"
   | "tool_call"
   | "tool_result"
@@ -84,6 +85,7 @@ export interface TrajectoryEvent {
   messageId?: string;
   title: string;
   detail?: string;
+  /** Most events carry `{ round, turn }`. Round is one user→final assistant; turns are PI steps inside it. */
   payload?: unknown;
   durationMs?: number;
 }

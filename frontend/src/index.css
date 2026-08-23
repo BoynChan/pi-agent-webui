@@ -80,6 +80,7 @@ select {
 
 .lane-thinking { --lane: var(--color-violet); }
 .lane-text { --lane: var(--color-scope); }
+.lane-user { --lane: var(--color-sand); }
 .lane-tool_call,
 .lane-tool_result { --lane: var(--color-copper); }
 .lane-skill_load { --lane: var(--color-sand); }
@@ -138,6 +139,12 @@ select {
   padding: 0;
 }
 .markdown a { color: var(--color-scope); }
+.markdown-interim {
+  color: var(--color-mute);
+}
+.markdown-interim a {
+  color: var(--color-scope-dim);
+}
 .markdown h1, .markdown h2, .markdown h3 {
   font-size: 13px;
   letter-spacing: 0.04em;
@@ -203,6 +210,11 @@ select {
   min-width: 3px;
   border-radius: 1px;
   opacity: 0.85;
+}
+
+.json-tree {
+  user-select: text;
+  cursor: text;
 }
 
 .field {

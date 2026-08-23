@@ -1,7 +1,9 @@
-import type { PluginKind, PluginSummary, TrajectoryEvent, TrajectoryEventType } from "@pi-debug/shared";
+import type { ChatMessage, PluginKind, PluginSummary, TrajectoryEvent, TrajectoryEventType } from "@pi-debug/shared";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { JsonTree } from "./JsonTree";
+import { eventRound, payloadNumber } from "../lib/rounds";
 import { useAppStore } from "../state/useAppStore";
 import { clock } from "../lib/time";
 
@@ -16,6 +18,7 @@ const KIND_LABEL: Record<PluginKind, string> = {
 const EVENT_FILTERS: Array<{ id: TrajectoryEventType | "all"; label: string }> = [
   { id: "all", label: "All" },
   { id: "thinking", label: "Think" },
+  { id: "user", label: "User" },
   { id: "text", label: "Text" },
   { id: "skill_load", label: "Skill" },
   { id: "tool_call", label: "Tool" },
@@ -175,10 +178,21 @@ function PluginRow({
 
 function TrajectoryTab() {
   const events = useAppStore((s) => s.current?.trajectory ?? []);
+  const messages = useAppStore((s) => s.current?.messages ?? []);
   const highlightMessage = useAppStore((s) => s.highlightMessage);
+  const highlightTrajectoryId = useAppStore((s) => s.highlightTrajectoryId);
   const setInspectorTab = useAppStore((s) => s.setInspectorTab);
   const [filter, setFilter] = useState<TrajectoryEventType | "all">("all");
   const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!highlightTrajectoryId) return;
+    setFilter("all");
+    setExpandedId(highlightTrajectoryId);
+    window.requestAnimationFrame(() => {
+      document.getElementById(`tr-${highlightTrajectoryId}`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+    });
+  }, [highlightTrajectoryId]);
 
   const visible = events.filter((e) => filter === "all" || e.type === filter || related(filter, e.type));
 
@@ -218,42 +232,45 @@ function TrajectoryTab() {
         ) : (
           visible.map((event) => {
             const expanded = expandedId === event.id;
-            const turn = turnNumber(event);
+            const loop = loopLabel(event, messages);
+            const preview = eventPreview(event);
+            const jumped = highlightTrajectoryId === event.id;
             return (
-              <button
+              <div
+                id={`tr-${event.id}`}
                 key={event.id}
-                type="button"
-                onClick={() => {
-                  setExpandedId(expanded ? null : event.id);
-                  if (event.messageId) highlightMessage(event.messageId);
-                }}
-                className={`lane lane-${event.type} mb-2 w-full rounded-[3px] bg-inset/60 px-2 py-1.5 text-left hover:bg-inset ${
-                  expanded ? "ring-1 ring-scope/30" : ""
-                }`}
+                className={`lane lane-${event.type} mb-2 w-full rounded-[3px] bg-inset/60 px-2 py-1.5 text-left ${
+                  expanded || jumped ? "ring-1 ring-scope/30" : ""
+                } ${jumped ? "flash-hit" : ""}`}
               >
-                <div className="flex items-baseline justify-between gap-2">
-                  <span className="font-mono text-[10px] uppercase tracking-wide text-mute">
-                    {event.type}
-                    {turn != null ? ` · turn ${turn}` : ""}
-                  </span>
-                  <span className="font-mono text-[10px] text-faint">{clock(event.ts)}</span>
-                </div>
-                <div className="text-[12.5px]">{event.title}</div>
-                {event.detail && !expanded ? (
-                  <div className="mt-0.5 line-clamp-4 font-mono text-[11px] text-mute">{event.detail}</div>
-                ) : null}
-                {expanded ? (
-                  <pre className="mt-1.5 max-h-96 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-mute">
-                    {expandedBody(event)}
-                  </pre>
-                ) : null}
-              </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExpandedId(expanded ? null : event.id);
+                    if (event.messageId) highlightMessage(event.messageId);
+                  }}
+                  className="w-full text-left hover:text-ink"
+                >
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="font-mono text-[10px] uppercase tracking-wide text-mute">
+                      {event.type}
+                      {loop}
+                    </span>
+                    <span className="font-mono text-[10px] text-faint">{clock(event.ts)}</span>
+                  </div>
+                  <div className="text-[12.5px]">{event.title}</div>
+                  {!expanded && preview ? (
+                    <div className="mt-0.5 line-clamp-4 font-mono text-[11px] text-mute">{preview}</div>
+                  ) : null}
+                </button>
+                {expanded ? <ExpandedEvent event={event} /> : null}
+              </div>
             );
           })
         )}
       </div>
       <p className="border-t border-hair px-3 py-2 font-mono text-[10px] text-faint">
-        Click a row to expand it (system prompt is under Prompt).{" "}
+        Click a row to jump to the chat block. The arrow on a message jumps back here.{" "}
         <button type="button" className="text-scope" onClick={() => setInspectorTab("plugins")}>
           Plugins
         </button>
@@ -262,25 +279,59 @@ function TrajectoryTab() {
   );
 }
 
-function expandedBody(event: TrajectoryEvent): string {
+function ExpandedEvent({ event }: { event: TrajectoryEvent }) {
+  const value = expandedValue(event);
+  if (value !== undefined && value !== null && typeof value === "object") {
+    return <JsonTree value={value} />;
+  }
+  if (typeof value === "string" && value) {
+    return (
+      <pre className="mt-1.5 max-h-96 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-mute">
+        {value}
+      </pre>
+    );
+  }
+  return null;
+}
+
+function expandedValue(event: TrajectoryEvent): unknown {
   const payload = event.payload;
   if (payload && typeof payload === "object") {
     const record = payload as Record<string, unknown>;
-    if (record.message !== undefined) {
-      return JSON.stringify(record.message, null, 2);
-    }
-    if (typeof record.thinking === "string" && record.thinking.length > 0) {
-      return record.thinking;
-    }
+    if (record.message !== undefined) return record.message;
+    if (typeof record.thinking === "string" && record.thinking.length > 0) return record.thinking;
+    const args = toolArgs(payload);
+    if (args !== undefined) return args;
   }
-  return event.detail ?? "";
+  return event.detail;
 }
 
-function turnNumber(event: TrajectoryEvent): number | undefined {
-  const payload = event.payload;
-  if (!payload || typeof payload !== "object" || !("turn" in payload)) return undefined;
-  const turn = (payload as { turn?: unknown }).turn;
-  return typeof turn === "number" && turn > 0 ? turn : undefined;
+function toolArgs(payload: unknown): unknown {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
+  const record = payload as Record<string, unknown>;
+  if ("args" in record) return record.args;
+  return undefined;
+}
+
+function eventPreview(event: TrajectoryEvent): string | undefined {
+  const args = toolArgs(event.payload);
+  if (event.type === "tool_call" && args !== undefined) {
+    try {
+      return JSON.stringify(args);
+    } catch {
+      /* fall through */
+    }
+  }
+  return event.detail;
+}
+
+function loopLabel(event: TrajectoryEvent, messages: ChatMessage[]): string {
+  const round = eventRound(event, messages);
+  const turn = payloadNumber(event.payload, "turn");
+  const parts: string[] = [];
+  if (round != null) parts.push(`round ${round}`);
+  if (turn != null) parts.push(`turn ${turn}`);
+  return parts.length > 0 ? ` · ${parts.join(" · ")}` : "";
 }
 
 function related(filter: TrajectoryEventType | "all", type: TrajectoryEventType): boolean {
@@ -297,6 +348,8 @@ function colorFor(type: TrajectoryEvent["type"]): string {
       return "var(--color-violet)";
     case "text":
       return "var(--color-scope)";
+    case "user":
+      return "var(--color-sand)";
     case "skill_load":
       return "var(--color-sand)";
     case "context":

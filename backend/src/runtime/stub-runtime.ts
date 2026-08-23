@@ -19,6 +19,18 @@ function id(prefix: string): string {
   return `${prefix}_${crypto.randomUUID().slice(0, 8)}`;
 }
 
+function userRound(messages: ChatMessage[]): number {
+  return Math.max(1, messages.filter((message) => message.role === "user").length);
+}
+
+function loopPayload(round: number, turn: number, extra?: Record<string, unknown>): Record<string, unknown> {
+  return extra ? { round, turn, ...extra } : { round, turn };
+}
+
+function loopDetail(round: number, turn: number, text: string): string {
+  return turn > 0 ? `round ${round} · turn ${turn} · ${text}` : `round ${round} · ${text}`;
+}
+
 export class StubRuntime implements AgentRuntime {
   readonly name = "stub";
   private readonly registry = new PluginRegistry();
@@ -76,6 +88,7 @@ export class StubRuntime implements AgentRuntime {
     const runId = input.runId;
     const turnId = id("turn");
     const ts = now();
+    const round = userRound(input.messages);
 
     const emitTraj = (
       type: TrajectoryEventType,
@@ -99,16 +112,28 @@ export class StubRuntime implements AgentRuntime {
 
     try {
       yield { type: "run_start", runId, ts };
-      yield emitTraj("run_start", "Run started", { ts, payload: { runtime: this.name } });
-      yield emitTraj("turn_start", "Turn opened", { ts });
+      yield emitTraj("run_start", "Run started", { ts, payload: { runtime: this.name, round } });
+      yield emitTraj("turn_start", `Round ${round} opened`, {
+        ts,
+        detail: `User → final assistant is round ${round}`,
+        payload: { round, turn: 0 },
+      });
       const systemPrompt = input.systemPrompt ?? defaultSystemPrompt(this);
       yield emitTraj("context", "System prompt", {
         detail: systemPrompt,
-        payload: { chars: systemPrompt.length, packets: ["skill-catalog", "workspace-facts"] },
+        payload: { round, chars: systemPrompt.length, packets: ["skill-catalog", "workspace-facts"] },
       });
+      const lastUser = [...input.messages].reverse().find((message) => message.role === "user");
+      if (lastUser) {
+        yield emitTraj("user", "User request", {
+          messageId: lastUser.id,
+          detail: loopDetail(round, 0, `${lastUser.content.length} chars`),
+          payload: loopPayload(round, 0, { message: lastUser }),
+        });
+      }
 
       if (!input.provider?.apiKey) {
-        yield* this.demoTurn(input, emitTraj, signal);
+        yield* this.demoTurn(input, emitTraj, signal, round);
         yield { type: "run_end", runId, ts: now(), outcome: "completed" };
         yield emitTraj("run_end", "Run completed (demo runtime)", {
           payload: { mode: "demo" },
@@ -116,7 +141,7 @@ export class StubRuntime implements AgentRuntime {
         return;
       }
 
-      yield* this.llmTurn(input, emitTraj, signal);
+      yield* this.llmTurn(input, emitTraj, signal, round);
       const aborted = signal.aborted;
       yield {
         type: "run_end",
@@ -148,6 +173,7 @@ export class StubRuntime implements AgentRuntime {
     input: RunTurnInput,
     emitTraj: (type: TrajectoryEventType, title: string, extra?: Partial<TrajectoryEvent>) => RuntimeEvent,
     signal: AbortSignal,
+    round: number,
   ): AsyncIterable<RuntimeEvent> {
     const lastUser = [...input.messages].reverse().find((m) => m.role === "user");
     const prompt = lastUser?.content ?? "";
@@ -174,11 +200,16 @@ export class StubRuntime implements AgentRuntime {
       message.thinking = (message.thinking ?? "") + piece;
       yield { type: "message_delta", messageId, field: "thinking", delta: piece };
     }
-    yield emitTraj("thinking", "Reasoning", { messageId, detail: thinking, durationMs: 80 });
+    yield emitTraj("thinking", "Reasoning", {
+      messageId,
+      detail: loopDetail(round, 1, `${thinking.length} chars`),
+      durationMs: 80,
+      payload: loopPayload(round, 1, { thinking }),
+    });
 
     yield emitTraj("skill_load", "Loaded skill: debug-session", {
-      detail: "SKILL.md from stub catalog",
-      payload: { skillId: "skill.debug-session" },
+      detail: loopDetail(round, 1, "SKILL.md from stub catalog"),
+      payload: loopPayload(round, 1, { skillId: "skill.debug-session" }),
       messageId,
     });
 
@@ -192,7 +223,8 @@ export class StubRuntime implements AgentRuntime {
     yield { type: "tool_call", messageId, toolCall: inspectCall };
     yield emitTraj("tool_call", "inspect_runtime", {
       messageId,
-      payload: inspectCall.args,
+      detail: loopDetail(round, 1, "inspect_runtime"),
+      payload: loopPayload(round, 1, { args: inspectCall.args }),
     });
 
     const tool = this.registry.tools.get("tool.inspect_runtime");
@@ -207,7 +239,8 @@ export class StubRuntime implements AgentRuntime {
     yield { type: "tool_result", messageId, toolCall: { ...inspectCall } };
     yield emitTraj("tool_result", "inspect_runtime → ok", {
       messageId,
-      detail: inspectCall.resultSnippet,
+      detail: loopDetail(round, 1, inspectCall.resultSnippet ?? ""),
+      payload: loopPayload(round, 1),
     });
 
     const body = demoReply(prompt);
@@ -217,15 +250,24 @@ export class StubRuntime implements AgentRuntime {
       message.content += piece;
       yield { type: "message_delta", messageId, field: "content", delta: piece };
     }
-    yield emitTraj("text", "Assistant text", { messageId, detail: `${body.length} chars` });
+    yield emitTraj("text", "Assistant text", {
+      messageId,
+      detail: loopDetail(round, 1, `${body.length} chars`),
+      payload: loopPayload(round, 1),
+    });
     yield { type: "message_end", message: { ...message, toolCalls: [{ ...inspectCall }] } };
-    yield emitTraj("turn_end", "Turn closed", { messageId });
+    yield emitTraj("turn_end", "Turn closed", {
+      messageId,
+      detail: `Round ${round} · turn 1 closed`,
+      payload: loopPayload(round, 1),
+    });
   }
 
   private async *llmTurn(
     input: RunTurnInput,
     emitTraj: (type: TrajectoryEventType, title: string, extra?: Partial<TrajectoryEvent>) => RuntimeEvent,
     signal: AbortSignal,
+    round: number,
   ): AsyncIterable<RuntimeEvent> {
     const tools = [...this.registry.tools.values()].filter((t) => t.enabled !== false);
     const connectorTools: ConnectorTool[] = tools.map((t) => ({
@@ -240,6 +282,10 @@ export class StubRuntime implements AgentRuntime {
     while (loops < 6) {
       loops += 1;
       if (signal.aborted) return;
+      yield emitTraj("user", "Request body", {
+        detail: loopDetail(round, loops, `${JSON.stringify(llmMessages).length} chars`),
+        payload: loopPayload(round, loops, { message: llmMessages }),
+      });
 
       const messageId = id("msg");
       const message: ChatMessage = {
@@ -272,22 +318,38 @@ export class StubRuntime implements AgentRuntime {
           errored = true;
           const err = chunk.error ?? "Provider error";
           yield { type: "error", message: err };
-          yield emitTraj("error", "Provider error", { detail: err, messageId });
+          yield emitTraj("error", "Provider error", {
+            detail: err,
+            messageId,
+            payload: loopPayload(round, loops),
+          });
           yield { type: "message_end", message: { ...message } };
           return;
         }
       }
 
       if (message.thinking) {
-        yield emitTraj("thinking", "Reasoning", { messageId, detail: `${message.thinking.length} chars` });
+        yield emitTraj("thinking", "Reasoning", {
+          messageId,
+          detail: loopDetail(round, loops, `${message.thinking.length} chars`),
+          payload: loopPayload(round, loops, { thinking: message.thinking }),
+        });
       }
       if (message.content) {
-        yield emitTraj("text", "Assistant text", { messageId, detail: `${message.content.length} chars` });
+        yield emitTraj("text", "Assistant text", {
+          messageId,
+          detail: loopDetail(round, loops, `${message.content.length} chars`),
+          payload: loopPayload(round, loops),
+        });
       }
 
       if (pendingCalls.length === 0) {
         yield { type: "message_end", message: { ...message } };
-        yield emitTraj("turn_end", "Turn closed", { messageId });
+        yield emitTraj("turn_end", "Turn closed", {
+          messageId,
+          detail: `Round ${round} · turn ${loops} closed`,
+          payload: loopPayload(round, loops),
+        });
         return;
       }
 
@@ -308,12 +370,17 @@ export class StubRuntime implements AgentRuntime {
         cards.push(card);
         message.toolCalls = [...cards];
         yield { type: "tool_call", messageId, toolCall: { ...card } };
-        yield emitTraj("tool_call", call.name, { messageId, payload: args });
+        yield emitTraj("tool_call", call.name, {
+          messageId,
+          detail: loopDetail(round, loops, call.name),
+          payload: loopPayload(round, loops, { args }),
+        });
 
         if (call.name === "load_skill" && typeof args.name === "string") {
           yield emitTraj("skill_load", `Loaded skill: ${args.name}`, {
             messageId,
-            payload: args,
+            detail: loopDetail(round, loops, args.name),
+            payload: loopPayload(round, loops, args),
           });
         }
 
@@ -332,7 +399,8 @@ export class StubRuntime implements AgentRuntime {
         yield { type: "tool_result", messageId, toolCall: { ...card } };
         yield emitTraj("tool_result", `${call.name} → ${card.status}`, {
           messageId,
-          detail: card.resultSnippet,
+          detail: loopDetail(round, loops, card.resultSnippet ?? ""),
+          payload: loopPayload(round, loops),
         });
       }
 
@@ -357,7 +425,10 @@ export class StubRuntime implements AgentRuntime {
       void errored;
     }
 
-    yield emitTraj("error", "Tool loop cap reached", { detail: "Stopped after 6 model steps." });
+    yield emitTraj("error", "Tool loop cap reached", {
+      detail: "Stopped after 6 model steps.",
+      payload: loopPayload(round, loops),
+    });
   }
 }
 

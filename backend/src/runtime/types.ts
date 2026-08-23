@@ -61,6 +61,8 @@ export interface RunTurnInput {
  *   runtime.runTurn(...)        → agent.prompt() + agent.subscribe(events)
  *
  * Event mapping (pi-agent-core → RuntimeEvent):
+ *   runTurn                     → one Round (user → final assistant)
+ *   PI turn_start / turn_end    → Turns inside that Round
  *   agent_start / turn_start    → trajectory run_start / turn_start
  *   message_update text_delta   → message_delta field=content
  *   thinking / reasoning        → message_delta field=thinking + trajectory thinking

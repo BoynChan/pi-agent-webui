@@ -194,6 +194,7 @@ export class PiAgentRuntime implements AgentRuntime {
     const runId = input.runId;
     const turnId = id("turn");
     const ts = now();
+    const round = Math.max(1, input.messages.filter((message) => message.role === "user").length);
     const pump = new EventPump();
 
     const emitTraj = (
@@ -217,7 +218,15 @@ export class PiAgentRuntime implements AgentRuntime {
     });
 
     pump.push({ type: "run_start", runId, ts });
-    pump.push(emitTraj("run_start", "PI Agent run started", { ts, payload: { cwd: this.cwd } }));
+    pump.push(
+      emitTraj("run_start", "PI Agent run started", {
+        ts,
+        payload: {
+          cwd: this.cwd,
+          round,
+        },
+      }),
+    );
 
     if (!input.provider?.apiKey) {
       const message = "No connector API key on this request. Open Connectors and select a provider.";
@@ -258,21 +267,41 @@ export class PiAgentRuntime implements AgentRuntime {
     this.session.agent.state.messages = historyToAgentMessages(input.messages);
 
     const skills = this.resourceLoader?.getSkills().skills ?? [];
-    pump.push(emitTraj("turn_start", "Turn opened"));
+    let assistantId: string | undefined;
+    let assistant: ChatMessage | undefined;
+    const toolCards = new Map<string, ToolCallCard>();
+    const loop = { turn: 0, round };
+    pump.push(
+      emitTraj("turn_start", `Round ${loop.round} opened`, {
+        detail: `User → final assistant is round ${loop.round}`,
+        payload: { round: loop.round, turn: 0 },
+      }),
+    );
 
     if (prompt.startsWith("/skill:")) {
       const skillName = prompt.slice(7).split(/\s+/)[0] ?? "";
       pump.push(
         emitTraj("skill_load", `Expanded /skill:${skillName}`, {
-          payload: { skill: skillName },
+          payload: { ...loop, skill: skillName },
         }),
       );
     }
 
-    let assistantId: string | undefined;
-    let assistant: ChatMessage | undefined;
-    const toolCards = new Map<string, ToolCallCard>();
-    const loop = { turn: 0 };
+    const lastUserId = [...input.messages].reverse().find((message) => message.role === "user")?.id;
+    const previousOnPayload = this.session.agent.onPayload;
+    this.session.agent.onPayload = async (payload, _model) => {
+      const next = previousOnPayload ? await previousOnPayload(payload, model) : payload;
+      const body = redactSecrets(jsonSafe(next ?? payload));
+      const chars = jsonChars(body);
+      pump.push(
+        emitTraj("user", "Request body", {
+          messageId: lastUserId,
+          detail: loopDetail(loop, `${chars} chars`),
+          payload: { ...loop, message: body },
+        }),
+      );
+      return next;
+    };
 
     const unsubscribe = this.session.subscribe((event) => {
       mapSessionEvent(event, {
@@ -325,6 +354,7 @@ export class PiAgentRuntime implements AgentRuntime {
       .finally(() => {
         unsubscribe();
         signal.removeEventListener("abort", onAbort);
+        if (this.session) this.session.agent.onPayload = previousOnPayload;
         pump.close();
         if (this.controllers.get(input.sessionId) === controller) {
           this.controllers.delete(input.sessionId);
@@ -466,7 +496,7 @@ interface MapContext {
   skills: Array<{ name: string; filePath: string }>;
   getSystemPrompt: () => string;
   cwd: string;
-  loop: { turn: number };
+  loop: { turn: number; round: number };
   readonly assistantId: string | undefined;
   setAssistant: (message: ChatMessage) => void;
   assistant: ChatMessage | undefined;
@@ -482,6 +512,7 @@ function mapSessionEvent(event: AgentSessionEvent, ctx: MapContext): void {
         ctx.emitTraj("context", "System prompt", {
           detail: systemPrompt || "(empty system prompt)",
           payload: {
+            ...ctx.loop,
             chars: systemPrompt.length,
             cwd: ctx.cwd,
             skillNames: ctx.skills.map((s) => s.name),
@@ -492,25 +523,25 @@ function mapSessionEvent(event: AgentSessionEvent, ctx: MapContext): void {
     }
     case "turn_start": {
       ctx.loop.turn += 1;
-      const turn = ctx.loop.turn;
+      const { turn, round } = ctx.loop;
       ctx.emit(
         ctx.emitTraj("turn_start", `PI turn ${turn}`, {
-          detail: `Turn ${turn} — one model response plus any tools in this step`,
-          payload: { turn },
+          detail: `Round ${round} · turn ${turn} — one model response plus any tools in this step`,
+          payload: { ...ctx.loop },
         }),
       );
       return;
     }
     case "turn_end": {
-      const turn = ctx.loop.turn;
+      const { turn, round } = ctx.loop;
       const toolCount = event.toolResults?.length ?? 0;
       ctx.emit(
         ctx.emitTraj("turn_end", `PI turn ${turn} ended`, {
           detail:
             toolCount > 0
-              ? `Turn ${turn} closed after ${toolCount} tool result${toolCount === 1 ? "" : "s"}`
-              : `Turn ${turn} closed — no tools`,
-          payload: { turn, toolCount },
+              ? `Round ${round} · turn ${turn} closed after ${toolCount} tool result${toolCount === 1 ? "" : "s"}`
+              : `Round ${round} · turn ${turn} closed — no tools`,
+          payload: { ...ctx.loop, toolCount },
         }),
       );
       return;
@@ -543,6 +574,16 @@ function mapSessionEvent(event: AgentSessionEvent, ctx: MapContext): void {
       return;
     }
     case "message_end": {
+      if (event.message.role === "user") {
+        const text = userText(event.message);
+        ctx.emit(
+          ctx.emitTraj("user", "User request", {
+            detail: loopDetail(ctx.loop, text ? `${text.length} chars` : "empty"),
+            payload: { ...ctx.loop, message: jsonSafe(event.message) },
+          }),
+        );
+        return;
+      }
       if (event.message.role !== "assistant" || !ctx.assistant) return;
       const text = assistantText(event.message);
       const thinking = assistantThinking(event.message);
@@ -556,16 +597,16 @@ function mapSessionEvent(event: AgentSessionEvent, ctx: MapContext): void {
         ctx.emit(
           ctx.emitTraj("thinking", "Reasoning", {
             messageId: ended.id,
-            detail: turnDetail(ctx, `${thinking.length} chars`),
-            payload: { turn: ctx.loop.turn, thinking },
+            detail: loopDetail(ctx.loop, `${thinking.length} chars`),
+            payload: { ...ctx.loop, thinking },
           }),
         );
       }
       ctx.emit(
         ctx.emitTraj("text", "Assistant text", {
           messageId: ended.id,
-          detail: turnDetail(ctx, text ? `${text.length} chars` : "no text · tool-only"),
-          payload: { turn: ctx.loop.turn, message: jsonSafe(event.message) },
+          detail: loopDetail(ctx.loop, text ? `${text.length} chars` : "no text · tool-only"),
+          payload: { ...ctx.loop, message: jsonSafe(event.message) },
         }),
       );
       ctx.emit({ type: "message_end", message: ended });
@@ -584,8 +625,8 @@ function mapSessionEvent(event: AgentSessionEvent, ctx: MapContext): void {
       ctx.emit(
         ctx.emitTraj("tool_call", event.toolName, {
           messageId,
-          detail: turnDetail(ctx, event.toolName),
-          payload: { turn: ctx.loop.turn, args: event.args },
+          detail: loopDetail(ctx.loop, argsPreview(event.args) || event.toolName),
+          payload: { ...ctx.loop, args: event.args },
         }),
       );
       const path = toolPath(event.args);
@@ -593,8 +634,8 @@ function mapSessionEvent(event: AgentSessionEvent, ctx: MapContext): void {
         ctx.emit(
           ctx.emitTraj("skill_load", `Read skill file ${path}`, {
             messageId,
-            detail: turnDetail(ctx, path),
-            payload: { turn: ctx.loop.turn, path },
+            detail: loopDetail(ctx.loop, path),
+            payload: { ...ctx.loop, path },
           }),
         );
       }
@@ -617,8 +658,8 @@ function mapSessionEvent(event: AgentSessionEvent, ctx: MapContext): void {
       ctx.emit(
         ctx.emitTraj("tool_result", `${event.toolName} → ${card.status}`, {
           messageId,
-          detail: turnDetail(ctx, snippet),
-          payload: { turn: ctx.loop.turn },
+          detail: loopDetail(ctx.loop, snippet),
+          payload: { ...ctx.loop },
         }),
       );
       return;
@@ -628,8 +669,18 @@ function mapSessionEvent(event: AgentSessionEvent, ctx: MapContext): void {
   }
 }
 
-function turnDetail(ctx: MapContext, text: string): string {
-  return ctx.loop.turn > 0 ? `turn ${ctx.loop.turn} · ${text}` : text;
+function loopDetail(loop: { turn: number; round: number }, text: string): string {
+  if (loop.turn > 0) return `round ${loop.round} · turn ${loop.turn} · ${text}`;
+  return `round ${loop.round} · ${text}`;
+}
+
+function argsPreview(args: unknown): string {
+  try {
+    const text = JSON.stringify(args);
+    return text && text !== "{}" && text !== "null" ? text : "";
+  } catch {
+    return "";
+  }
 }
 
 function jsonSafe(value: unknown): unknown {
@@ -644,6 +695,30 @@ function jsonSafe(value: unknown): unknown {
   } catch {
     return { error: "Could not serialize value" };
   }
+}
+
+function jsonChars(value: unknown): number {
+  try {
+    return JSON.stringify(value).length;
+  } catch {
+    return 0;
+  }
+}
+
+function redactSecrets(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const record = { ...(value as Record<string, unknown>) };
+  for (const key of Object.keys(record)) {
+    if (/^(api[_-]?key|authorization|secret|password)$/i.test(key) && typeof record[key] === "string") {
+      record[key] = "••••";
+    }
+  }
+  return record;
+}
+
+function userText(message: { content?: unknown }): string {
+  if (typeof message.content === "string") return message.content;
+  return assistantText(message);
 }
 
 function assistantText(message: { content?: unknown }): string {

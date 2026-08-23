@@ -9,13 +9,14 @@ export function ChatPane() {
   const current = useAppStore((s) => s.current);
   const streaming = useAppStore((s) => s.streaming);
   const streamError = useAppStore((s) => s.streamError);
+  const stopNotice = useAppStore((s) => s.stopNotice);
   const providers = useAppStore((s) => s.providers);
   const activeProviderId = useAppStore((s) => s.activeProviderId);
   const setActiveProvider = useAppStore((s) => s.setActiveProvider);
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
 
   return (
-    <section className="flex min-h-0 flex-col border-r border-hair bg-chassis">
+    <section className="flex min-h-0 min-w-0 flex-1 flex-col bg-chassis">
       <header className="flex items-center justify-between gap-3 border-b border-hair px-4 py-2.5">
         <div className="min-w-0">
           <div className="truncate text-[13px] font-medium">{current?.title ?? "No session"}</div>
@@ -44,6 +45,11 @@ export function ChatPane() {
 
       <MessageList />
 
+      {stopNotice ? (
+        <div className="border-t border-sand/35 bg-sand/10 px-4 py-2 font-mono text-[12px] text-sand">
+          {stopNotice}
+        </div>
+      ) : null}
       {streamError ? (
         <div className="border-t border-rose/30 bg-rose/10 px-4 py-2 text-[12px] text-rose">
           {streamError}{" "}
@@ -82,11 +88,13 @@ function MessageList() {
         </h1>
         <p className="mt-3 max-w-xl text-[13.5px] leading-relaxed text-mute">
           Left: sessions persisted in this browser. Center: the round you are debugging. Right: plugins
-          discovered from this PI process (skills, tools, SCP) plus the trajectory ledger.
+          discovered from this PI process (skills, tools, MCP, SCP) plus the trajectory ledger. The
+          agent identity is a personal assistant — it reads the live tool / MCP / skill catalog each turn.
         </p>
         <p className="mt-3 max-w-xl text-[13px] leading-relaxed text-mute">
-          After you add a skill under <span className="font-mono">~/.pi/agent/skills</span>, click Refresh on
-          the Plugins tab (or reload this page).
+          After you add a skill under <span className="font-mono">.pi/skills</span> in this repo or{" "}
+          <span className="font-mono">~/.pi/agent/skills</span>, click Refresh on the Plugins tab (or reload
+          this page).
         </p>
         <ul className="mt-6 space-y-2 font-mono text-[12px] text-mute">
           <li>1. Optional: open Connectors and add an OpenAI-compatible or Anthropic endpoint.</li>
@@ -363,7 +371,9 @@ function ToolCard({ call }: { call: ToolCallCard }) {
       className={`mt-2 rounded-[3px] bg-inset ${
         call.status === "running" || call.status === "pending"
           ? "tool-card-running"
-          : "border border-copper/35"
+          : call.status === "aborted"
+            ? "border border-sand/40"
+            : "border border-copper/35"
       }`}
     >
       <button type="button" className="flex w-full items-center gap-2 px-3 py-2 text-left" onClick={() => setOpen((v) => !v)}>

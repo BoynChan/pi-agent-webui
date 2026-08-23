@@ -21,6 +21,14 @@ import type {
   TrajectoryEventType,
 } from "@pi-debug/shared";
 import { EventPump } from "./event-pump.ts";
+import { listMcpServers } from "./mcp-catalog.ts";
+import { killToolChildProcesses } from "./kill-tool-processes.ts";
+import {
+  filterHarnessContextFiles,
+  harnessSystemPromptFile,
+  loadHarnessSystemPrompt,
+  personalAssistantExtension,
+} from "./personal-assistant-prompt.ts";
 import { historyToAgentMessages, lastUserText } from "./pi-messages.ts";
 import { modelFromProvider, placeholderModel } from "./pi-model.ts";
 import { PluginRegistry } from "./plugin-registry.ts";
@@ -56,6 +64,21 @@ function isUnderDir(filePath: string, dir: string): boolean {
   if (target === root) return true;
   const prefix = root.endsWith(sep) ? root : `${root}${sep}`;
   return target.startsWith(prefix);
+}
+
+function skillSearchDirs(cwd: string, agentDir: string): string[] {
+  return [
+    join(agentDir, "skills"),
+    join(cwd, ".pi", "skills"),
+    join(agentDir, "npm"),
+    join(cwd, ".pi", "npm"),
+    join(agentDir, "npm", "node_modules", "pi-mcp-adapter", "skills"),
+    join(cwd, ".pi", "npm", "node_modules", "pi-mcp-adapter", "skills"),
+  ];
+}
+
+function isAllowedSkill(filePath: string, dirs: string[]): boolean {
+  return dirs.some((dir) => isUnderDir(filePath, dir));
 }
 
 function defaultCwd(): string {
@@ -94,8 +117,7 @@ export class PiAgentRuntime implements AgentRuntime {
     this.agentDir = process.env.PI_AGENT_DIR?.trim()
       ? resolve(process.env.PI_AGENT_DIR)
       : getAgentDir();
-    const skillsDir = join(this.agentDir, "skills");
-    this.skillDirs = [skillsDir];
+    this.skillDirs = skillSearchDirs(this.cwd, this.agentDir);
 
     this.modelRuntime = await ModelRuntime.create({ refreshOnCreate: false });
     const settingsManager = SettingsManager.create(this.cwd, this.agentDir);
@@ -104,11 +126,20 @@ export class PiAgentRuntime implements AgentRuntime {
       agentDir: this.agentDir,
       settingsManager,
       noSkills: true,
-      additionalSkillPaths: [skillsDir],
+      additionalSkillPaths: this.skillDirs,
       skillsOverride: (current) => ({
-        skills: current.skills.filter((skill) => isUnderDir(skill.filePath, skillsDir)),
+        skills: current.skills.filter((skill) => isAllowedSkill(skill.filePath, this.skillDirs)),
         diagnostics: current.diagnostics,
       }),
+      agentsFilesOverride: (current) => ({
+        agentsFiles: filterHarnessContextFiles(current.agentsFiles),
+      }),
+      // Replace PI's coding-agent identity. Always use this harness prompt, even if
+      // PI_DEBUG_CWD points at another repo that has its own SYSTEM.md.
+      systemPromptOverride: () => loadHarnessSystemPrompt(),
+      extensionFactories: [
+        personalAssistantExtension(() => listMcpServers(this.cwd, this.agentDir)),
+      ],
     });
     await this.resourceLoader.reload();
 
@@ -165,7 +196,15 @@ export class PiAgentRuntime implements AgentRuntime {
 
   stop(sessionId: string): void {
     this.controllers.get(sessionId)?.abort();
+    this.haltRunningTools();
     void this.session?.abort();
+  }
+
+  /** Abort the PI loop and kill leftover bash/find children. `session.abort()` waits for idle and does not call abortBash(). */
+  private haltRunningTools(): void {
+    this.session?.abortBash();
+    this.session?.agent.abort();
+    killToolChildProcesses();
   }
 
   async reload(): Promise<void> {
@@ -324,6 +363,14 @@ export class PiAgentRuntime implements AgentRuntime {
     });
 
     const onAbort = () => {
+      abortOpenToolCards({
+        emit: (runtimeEvent) => pump.push(runtimeEvent),
+        emitTraj,
+        loop,
+        assistantId,
+        toolCards,
+      });
+      this.haltRunningTools();
       void this.session?.abort();
     };
     signal.addEventListener("abort", onAbort, { once: true });
@@ -381,10 +428,9 @@ export class PiAgentRuntime implements AgentRuntime {
       return;
     }
 
-    const skillsDir = this.skillDirs[0] ?? join(this.agentDir, "skills");
     const active = new Set(session.getActiveToolNames());
     for (const skill of loader.getSkills().skills) {
-      if (!isUnderDir(skill.filePath, skillsDir)) continue;
+      if (!isAllowedSkill(skill.filePath, this.skillDirs)) continue;
       let content = "";
       try {
         content = readFileSync(skill.filePath, "utf8");
@@ -415,9 +461,37 @@ export class PiAgentRuntime implements AgentRuntime {
       });
     }
 
+    for (const server of listMcpServers(this.cwd, this.agentDir)) {
+      next.registerPlugin({
+        id: `mcp.${server.name}`,
+        name: server.name,
+        kind: "mcp",
+        origin: server.origin,
+        enabled: server.enabled,
+        description: server.description,
+        filePath: server.origin,
+        contentLanguage: "json",
+        content: JSON.stringify(server.definition, null, 2),
+        schema: server.definition,
+      });
+    }
+
+    const systemPromptPath = harnessSystemPromptFile();
+    next.registerPlugin({
+      id: "scp.system-prompt",
+      name: "system-prompt",
+      kind: "scp",
+      origin: existsSync(systemPromptPath) ? systemPromptPath : "pi://system-prompt/personal-assistant",
+      description:
+        "Harness identity: personal assistant. Edit .pi/SYSTEM.md, then Refresh. Tools, MCP, and skills are injected each turn.",
+      contentLanguage: "markdown",
+      filePath: existsSync(systemPromptPath) ? systemPromptPath : undefined,
+      content: loadHarnessSystemPrompt(),
+    });
+
     const skillList = loader
       .getSkills()
-      .skills.filter((s) => isUnderDir(s.filePath, skillsDir))
+      .skills.filter((s) => isAllowedSkill(s.filePath, this.skillDirs))
       .map((s) => `- ${s.name}: ${s.description}`)
       .join("\n");
     next.registerPlugin({
@@ -436,7 +510,8 @@ export class PiAgentRuntime implements AgentRuntime {
       name: "agents-md",
       kind: "scp",
       origin: agentsFiles[0]?.path ?? "pi://AGENTS.md",
-      description: "Project / user AGENTS.md (and CLAUDE.md) files folded into the system prompt.",
+      description:
+        "Project AGENTS.md / CLAUDE.md only. ~/.codex/AGENTS.md and ~/AGENTS.md are not folded into the system prompt.",
       contentLanguage: "markdown",
       filePath: agentsFiles[0]?.path,
       content:
@@ -474,8 +549,10 @@ export class PiAgentRuntime implements AgentRuntime {
       content: [
         `cwd: ${this.cwd}`,
         `agentDir: ${this.agentDir}`,
-        `skills: ${join(this.agentDir, "skills")} only (PI_AGENT_DIR/skills)`,
-        "Codex ~/.agents/skills, project .agents/skills, <cwd>/.pi/skills, and <cwd>/skills are not loaded.",
+        `skills: ${this.skillDirs.join(" + ")}`,
+        `systemPrompt: ${existsSync(systemPromptPath) ? systemPromptPath : "built-in personal assistant"}`,
+        "Identity is a personal assistant, not PI's default coding-agent prompt.",
+        "Codex ~/.agents/skills, project .agents/skills, and <cwd>/skills are not loaded.",
         "Click Refresh (or reload the page) after adding a SKILL.md or extension tool.",
       ].join("\n"),
     });
@@ -501,6 +578,29 @@ interface MapContext {
   setAssistant: (message: ChatMessage) => void;
   assistant: ChatMessage | undefined;
   toolCards: Map<string, ToolCallCard>;
+}
+
+function abortOpenToolCards(ctx: {
+  emit: (event: RuntimeEvent) => void;
+  emitTraj: (type: TrajectoryEventType, title: string, extra?: Partial<TrajectoryEvent>) => RuntimeEvent;
+  loop: { turn: number; round: number };
+  assistantId: string | undefined;
+  toolCards: Map<string, ToolCallCard>;
+}): void {
+  const snippet = "Stopped by you — tool aborted.";
+  for (const [id, card] of ctx.toolCards) {
+    if (card.status !== "running" && card.status !== "pending") continue;
+    const next: ToolCallCard = { ...card, status: "aborted", resultSnippet: snippet };
+    ctx.toolCards.set(id, next);
+    if (ctx.assistantId) ctx.emit({ type: "tool_result", messageId: ctx.assistantId, toolCall: { ...next } });
+    ctx.emit(
+      ctx.emitTraj("tool_result", `${card.name} → aborted`, {
+        messageId: ctx.assistantId,
+        detail: loopDetail(ctx.loop, snippet),
+        payload: { ...ctx.loop, source: "manual" },
+      }),
+    );
+  }
 }
 
 function mapSessionEvent(event: AgentSessionEvent, ctx: MapContext): void {
@@ -649,7 +749,7 @@ function mapSessionEvent(event: AgentSessionEvent, ctx: MapContext): void {
         id: event.toolCallId,
         name: event.toolName,
         args: existing?.args ?? {},
-        status: event.isError ? "error" : "ok",
+        status: event.isError ? (isAbortResult(snippet) ? "aborted" : "error") : "ok",
         result: event.result,
         resultSnippet: snippet,
       };
@@ -752,6 +852,10 @@ function isSkillPath(path: string, skills: Array<{ filePath: string }>): boolean
   if (path.includes("SKILL.md")) return true;
   const resolved = resolve(path);
   return skills.some((skill) => resolve(skill.filePath) === resolved);
+}
+
+function isAbortResult(snippet: string): boolean {
+  return /abort|stopped by you/i.test(snippet);
 }
 
 function toolResultSnippet(result: unknown): string {

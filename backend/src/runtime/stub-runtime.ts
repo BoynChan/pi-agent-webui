@@ -8,6 +8,7 @@ import type {
   ToolCallCard,
 } from "@pi-debug/shared";
 import { streamChat, type ChatCompletionMessage, type ConnectorTool } from "./connector.ts";
+import { loadHarnessSystemPrompt } from "./personal-assistant-prompt.ts";
 import { PluginRegistry } from "./plugin-registry.ts";
 import type { AgentRuntime, RegisteredPlugin, RegisteredSkill, RegisteredTool, RunTurnInput } from "./types.ts";
 
@@ -231,7 +232,17 @@ export class StubRuntime implements AgentRuntime {
     const result = tool
       ? await tool.execute({ include: "plugins" })
       : { text: "runtime stub" };
-    if (signal.aborted) return;
+    if (signal.aborted) {
+      inspectCall.status = "aborted";
+      inspectCall.resultSnippet = "Stopped by you — tool aborted.";
+      yield { type: "tool_result", messageId, toolCall: { ...inspectCall } };
+      yield emitTraj("tool_result", "inspect_runtime → aborted", {
+        messageId,
+        detail: loopDetail(round, 1, inspectCall.resultSnippet),
+        payload: loopPayload(round, 1, { source: "manual" }),
+      });
+      return;
+    }
     await sleep(120, signal);
     inspectCall.status = "ok";
     inspectCall.result = result.data ?? result.text;
@@ -433,16 +444,34 @@ export class StubRuntime implements AgentRuntime {
 }
 
 function defaultSystemPrompt(runtime: StubRuntime): string {
+  const tools = runtime
+    .listPlugins()
+    .filter((p) => p.kind === "tool" && p.enabled)
+    .map((p) => `- ${p.name}: ${p.description}`)
+    .join("\n");
   const skills = runtime
     .listPlugins()
     .filter((p) => p.kind === "skill" && p.enabled)
     .map((p) => `- ${p.name}: ${p.description}`)
     .join("\n");
+  const mcp = runtime
+    .listPlugins()
+    .filter((p) => p.kind === "mcp" && p.enabled)
+    .map((p) => `- ${p.name}: ${p.description}`)
+    .join("\n");
   return [
-    "You are PI Agent running inside a local debug harness.",
-    "Be concrete. Prefer using inspect_runtime or load_skill when the user asks how the runtime is wired.",
-    "Available skills:",
-    skills || "(none)",
+    loadHarnessSystemPrompt(),
+    "",
+    "## Live capabilities this turn",
+    "",
+    "### Tools",
+    tools || "- (none)",
+    "",
+    "### MCP servers",
+    mcp || "- (none)",
+    "",
+    "### Skills",
+    skills || "- (none)",
   ].join("\n");
 }
 

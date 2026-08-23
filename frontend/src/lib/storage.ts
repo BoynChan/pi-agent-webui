@@ -1,5 +1,5 @@
 import { del, get, set } from "idb-keyval";
-import type { ChatMessage, PluginSummary, ProviderConfig, TrajectoryEvent } from "@pi-debug/shared";
+import type { ChatMessage, PluginKind, PluginSummary, ProviderConfig, TrajectoryEvent } from "@pi-debug/shared";
 
 export const SETTINGS_KEY = "pi-debug.providers.v1";
 export const UI_KEY = "pi-debug.ui.v1";
@@ -26,6 +26,8 @@ export interface UiPrefs {
   inspectorTab: "plugins" | "trajectory";
   sidebarWidth: number;
   inspectorWidth: number;
+  sidebarCollapsed?: boolean;
+  collapsedPluginKinds?: PluginKind[];
 }
 
 export interface StoredProviders {

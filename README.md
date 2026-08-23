@@ -52,7 +52,7 @@ pnpm dev:backend
 pnpm dev:frontend
 ```
 
-Send a prompt with a connector selected (⌘,). The backend embeds **PI Agent** (`@earendil-works/pi-coding-agent`): it discovers skills and tools from disk, streams thinking / tool cards / trajectory, and executes the real `read` / `bash` / `edit` / `write` (plus grep/find/ls and extension tools) in `PI_DEBUG_CWD`.
+Send a prompt with a connector selected (⌘,). The backend embeds **PI Agent** (`@earendil-works/pi-coding-agent`) as a **personal assistant**: identity comes from `.pi/SYSTEM.md` (not PI's default "expert coding assistant" prompt). Each turn injects the live tool list, MCP servers, and skill catalog so the model reads those instead of assuming a coding-only role. It still executes `read` / `bash` / `edit` / `write` (plus grep/find/ls, extension tools, and MCP tools) in `PI_DEBUG_CWD`.
 
 After you add a new `SKILL.md` or extension tool, click **Refresh** on the Plugins tab (or reload the page). That runs `POST /api/plugins/reload` and rescans disk. The next chat turn sees the updated catalog.
 
@@ -97,9 +97,22 @@ runTurn({ messages, plugins, providerConfig, abortSignal }) -> async iterable ev
 
 Default `createRuntime()` embeds PI Agent (`PiAgentRuntime`). Set `PI_DEBUG_RUNTIME=stub` for the in-process demo catalog.
 
-Skill discovery: **only** `~/.pi/agent/skills` (or `PI_AGENT_DIR/skills`). Codex/Agent Skills under `~/.agents/skills`, project `.agents/skills`, `<cwd>/.pi/skills`, and `<cwd>/skills` are not loaded.
+Skill discovery: `~/.pi/agent/skills` (or `PI_AGENT_DIR/skills`) **and** `<cwd>/.pi/skills`, plus skills shipped by installed PI packages (`.pi/npm`, `~/.pi/agent/npm`). Codex/Agent Skills under `~/.agents/skills`, project `.agents/skills`, and `<cwd>/skills` are not loaded.
 
-Tools come from PI’s built-ins (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`) plus any coding-agent extensions/custom tools. Clicking **Refresh** calls `session.reload()` so a newly dropped `SKILL.md` or extension is visible in the Plugins tab **and** injected on the next turn.
+Tools come from PI’s built-ins (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`) plus any coding-agent extensions/custom tools (including `pi-mcp-adapter` when listed in `.pi/settings.json`). Clicking **Refresh** calls `session.reload()` so a newly dropped `SKILL.md` or extension is visible in the Plugins tab **and** injected on the next turn.
+
+Context7 MCP is configured in `.mcp.json`. Set `CONTEXT7_API_KEY` in a local `.env` (see `.env.example`); the backend loads it before starting the runtime.
+
+### System prompt
+
+PI's built-in prompt starts with "You are an expert coding assistant…". This harness replaces that:
+
+- **Identity:** `.pi/SYSTEM.md` (fallback text in `backend/src/runtime/personal-assistant-prompt.ts` if the file is missing)
+- **Live packet each turn:** current tools, MCP servers from `.mcp.json`, and discovered skills
+- **Also folded in:** project `AGENTS.md` / `CLAUDE.md` under the workspace only
+- **Not folded in:** `~/.codex/AGENTS.md`, `~/AGENTS.md`, and PI's built-in documentation block
+
+Edit `.pi/SYSTEM.md` and click **Refresh** on the Plugins tab. The next chat turn uses the new identity. `PI_DEBUG_CWD` pointing at another repo does not pick up that repo's `SYSTEM.md` for identity — this harness prompt always wins.
 
 ## Workspace
 

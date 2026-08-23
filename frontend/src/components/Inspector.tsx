@@ -1,4 +1,11 @@
-import type { ChatMessage, PluginKind, PluginSummary, TrajectoryEvent, TrajectoryEventType } from "@pi-debug/shared";
+import type {
+  ChatMessage,
+  PluginDetail,
+  PluginKind,
+  PluginSummary,
+  TrajectoryEvent,
+  TrajectoryEventType,
+} from "@pi-debug/shared";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useEffect, useMemo, useState } from "react";
@@ -7,9 +14,10 @@ import { eventRound, payloadNumber } from "../lib/rounds";
 import { useAppStore } from "../state/useAppStore";
 import { clock } from "../lib/time";
 
-const KINDS: PluginKind[] = ["skill", "tool", "scp", "other"];
+const KINDS: PluginKind[] = ["skill", "mcp", "tool", "scp", "other"];
 const KIND_LABEL: Record<PluginKind, string> = {
   skill: "Skills",
+  mcp: "MCP",
   tool: "Tools",
   scp: "SCP",
   other: "Other plugins",
@@ -31,7 +39,7 @@ export function Inspector() {
   const tab = useAppStore((s) => s.inspectorTab);
   const setInspectorTab = useAppStore((s) => s.setInspectorTab);
   return (
-    <aside className="flex min-h-0 flex-col bg-panel">
+    <aside className="flex min-h-0 h-full w-full flex-col bg-panel">
       <div className="flex border-b border-hair">
         {(["plugins", "trajectory"] as const).map((id) => (
           <button
@@ -60,10 +68,13 @@ function PluginsTab() {
   const openPlugin = useAppStore((s) => s.openPlugin);
   const refreshPlugins = useAppStore((s) => s.refreshPlugins);
   const runtimeInfo = useAppStore((s) => s.runtimeInfo);
+  const collapsedPluginKinds = useAppStore((s) => s.collapsedPluginKinds);
+  const togglePluginKind = useAppStore((s) => s.togglePluginKind);
   const [rescanning, setRescanning] = useState(false);
 
   const list = plugins.length > 0 ? plugins : snapshot;
   const cwd = runtimeInfo?.cwd;
+  const selected = list.find((plugin) => plugin.id === selectedPluginId);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -82,68 +93,117 @@ function PluginsTab() {
           {rescanning ? "Scanning…" : "Refresh"}
         </button>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
         {KINDS.map((kind) => {
           const items = list.filter((p) => p.kind === kind);
-          if (items.length === 0) return null;
+          if (items.length === 0 && kind !== "mcp") return null;
+          const collapsed = collapsedPluginKinds.includes(kind);
           return (
             <section key={kind} className="mb-3">
-              <h2 className="px-2 pb-1 font-mono text-[10px] uppercase tracking-[0.18em] text-mute">
-                {KIND_LABEL[kind]}
-                <span className="ml-2 text-faint">{items.length}</span>
-              </h2>
-              {items.map((plugin) => (
-                <PluginRow
-                  key={plugin.id}
-                  plugin={plugin}
-                  active={selectedPluginId === plugin.id}
-                  onOpen={() => void openPlugin(plugin.id)}
-                />
-              ))}
+              <div className="mb-1 flex items-center gap-1 px-1">
+                <button
+                  type="button"
+                  aria-expanded={!collapsed}
+                  aria-label={collapsed ? `Show ${KIND_LABEL[kind]}` : `Hide ${KIND_LABEL[kind]}`}
+                  title={collapsed ? "Show group" : "Hide group"}
+                  onClick={() => togglePluginKind(kind)}
+                  className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-[2px] font-mono text-[10px] leading-none text-faint hover:bg-bezel hover:text-ink"
+                >
+                  {collapsed ? "▸" : "▾"}
+                </button>
+                <h2 className="min-w-0 flex-1 font-mono text-[10px] uppercase tracking-[0.18em] text-mute">
+                  {KIND_LABEL[kind]}
+                  <span className="ml-2 text-faint">{items.length}</span>
+                </h2>
+              </div>
+              {collapsed ? null : items.length === 0 && kind === "mcp" ? (
+                <p className="px-2 pb-2 text-[12px] text-mute">
+                  No MCP servers. Add one in <span className="font-mono">.mcp.json</span>, then click Refresh.
+                </p>
+              ) : null}
+              {collapsed
+                ? null
+                : items.map((plugin) => (
+                    <PluginRow
+                      key={plugin.id}
+                      plugin={plugin}
+                      active={selectedPluginId === plugin.id}
+                      onOpen={() => void openPlugin(plugin.id)}
+                    />
+                  ))}
             </section>
           );
         })}
         {list.length === 0 ? (
           <p className="px-2 py-6 text-[12px] text-mute">
             No skills or tools yet. Drop a <span className="font-mono">SKILL.md</span> under{" "}
-            <span className="font-mono">~/.pi/agent/skills</span>, then click Refresh.
+            <span className="font-mono">.pi/skills</span> or <span className="font-mono">~/.pi/agent/skills</span>
+            , then click Refresh.
           </p>
         ) : null}
-        {selectedPluginId ? (
-          <div className="mt-2 rounded-[3px] border border-hair bg-inset p-3">
-            {pluginDetailError ? <p className="text-[12px] text-rose">{pluginDetailError}</p> : null}
-            {!pluginDetail && !pluginDetailError ? (
-              <p className="font-mono text-[11px] text-mute">Loading plugin…</p>
-            ) : null}
-            {pluginDetail ? (
-              <div>
-                <div className="text-[13px] font-medium">{pluginDetail.name}</div>
-                <div className="mt-1 font-mono text-[10px] text-faint">
-                  {pluginDetail.kind} · {pluginDetail.origin ?? pluginDetail.source}
-                  {pluginDetail.filePath ? ` · ${pluginDetail.filePath}` : ""}
-                </div>
-                <p className="mt-2 text-[12px] text-mute">{pluginDetail.description}</p>
-                {pluginDetail.content ? (
-                  <div className="markdown mt-3 max-h-80 overflow-auto border-t border-hair pt-3">
-                    {pluginDetail.contentLanguage === "markdown" ? (
-                      <Markdown remarkPlugins={[remarkGfm]}>{pluginDetail.content}</Markdown>
-                    ) : (
-                      <pre className="whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-mute">
-                        {pluginDetail.content}
-                      </pre>
-                    )}
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-          </div>
-        ) : (
-          <p className="px-2 pt-2 text-[12px] text-faint">
-            Select a plugin to read its schema or SKILL.md. After you add a skill or tool on disk, click Refresh — a
-            browser reload also rescans.
-          </p>
-        )}
       </div>
+      <PluginDetailPane
+        selected={selected}
+        detail={pluginDetail}
+        error={pluginDetailError}
+      />
+    </div>
+  );
+}
+
+function PluginDetailPane({
+  selected,
+  detail,
+  error,
+}: {
+  selected: PluginSummary | undefined;
+  detail: PluginDetail | null;
+  error: string | null;
+}) {
+  if (!selected) {
+    return (
+      <p className="shrink-0 border-t border-hair px-3 py-2 text-[12px] text-faint">
+        Click a plugin to see its description. Skills show the SKILL.md summary; MCP servers show the transport.
+      </p>
+    );
+  }
+
+  const name = detail?.name ?? selected.name;
+  const description = detail?.description || selected.description;
+  const origin = detail?.origin ?? selected.origin ?? selected.source;
+  const filePath = detail?.filePath;
+  const content = detail?.content;
+  const language = detail?.contentLanguage;
+  const showBody = Boolean(content) && content !== description;
+
+  return (
+    <div className="max-h-[46%] shrink-0 overflow-y-auto border-t border-hair bg-inset px-3 py-3">
+      <div className="text-[13px] font-medium">{name}</div>
+      <div className="mt-1 font-mono text-[10px] text-faint">
+        {selected.kind}
+        {origin ? ` · ${origin}` : ""}
+        {filePath && filePath !== origin ? ` · ${filePath}` : ""}
+      </div>
+      {error ? <p className="mt-2 text-[12px] text-rose">{error}</p> : null}
+      {description ? (
+        <p className="mt-2 whitespace-pre-wrap text-[12px] leading-relaxed text-mute">{description}</p>
+      ) : (
+        <p className="mt-2 text-[12px] text-faint">No description.</p>
+      )}
+      {showBody ? (
+        <details className="mt-3 border-t border-hair pt-2">
+          <summary className="cursor-pointer font-mono text-[10px] uppercase tracking-wide text-faint hover:text-ink">
+            {selected.kind === "skill" ? "SKILL.md" : selected.kind === "tool" ? "Schema" : "Details"}
+          </summary>
+          <div className="markdown mt-2">
+            {language === "markdown" ? (
+              <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
+            ) : (
+              <pre className="whitespace-pre-wrap font-mono text-[11px] leading-relaxed text-mute">{content}</pre>
+            )}
+          </div>
+        </details>
+      ) : null}
     </div>
   );
 }

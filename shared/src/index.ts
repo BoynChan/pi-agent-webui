@@ -1,4 +1,4 @@
-export type PluginKind = "skill" | "tool" | "scp" | "other";
+export type PluginKind = "skill" | "mcp" | "tool" | "scp" | "other";
 export type PluginSource = "backend" | "client" | "session";
 
 export interface PluginSummary {
@@ -40,7 +40,7 @@ export interface ProviderWireConfig {
 
 export type ChatRole = "user" | "assistant" | "system" | "tool";
 
-export type ToolCallStatus = "pending" | "running" | "ok" | "error";
+export type ToolCallStatus = "pending" | "running" | "ok" | "error" | "aborted";
 
 export interface ToolCallCard {
   id: string;

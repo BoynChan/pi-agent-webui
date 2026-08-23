@@ -1,10 +1,22 @@
-import { useEffect } from "react";
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { ChatPane } from "./ChatPane";
 import { Inspector } from "./Inspector";
 import { SessionSidebar } from "./SessionSidebar";
 import { SettingsModal } from "./SettingsModal";
 import { StatusBar } from "./StatusBar";
 import { useAppStore } from "../state/useAppStore";
+
+const INSPECTOR_MIN = 280;
+const INSPECTOR_MAX = 720;
+const CHAT_MIN = 320;
+const SIDEBAR_OPEN = 260;
+const SIDEBAR_RAIL = 44;
+
+function clampInspectorWidth(width: number, sidebarCollapsed: boolean): number {
+  const sidebar = sidebarCollapsed ? SIDEBAR_RAIL : SIDEBAR_OPEN;
+  const max = Math.max(INSPECTOR_MIN, Math.min(INSPECTOR_MAX, window.innerWidth - sidebar - CHAT_MIN));
+  return Math.round(Math.min(max, Math.max(INSPECTOR_MIN, width)));
+}
 
 export function AppShell() {
   const hydrate = useAppStore((s) => s.hydrate);
@@ -17,6 +29,12 @@ export function AppShell() {
   const selectSession = useAppStore((s) => s.selectSession);
   const stop = useAppStore((s) => s.stop);
   const streaming = useAppStore((s) => s.streaming);
+  const inspectorWidth = useAppStore((s) => s.inspectorWidth);
+  const sidebarCollapsed = useAppStore((s) => s.sidebarCollapsed);
+  const setInspectorWidth = useAppStore((s) => s.setInspectorWidth);
+  const commitLayout = useAppStore((s) => s.commitLayout);
+  const [draggingInspector, setDraggingInspector] = useState(false);
+  const shellRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     void hydrate();
@@ -62,6 +80,36 @@ export function AppShell() {
     return () => window.removeEventListener("keydown", onKey);
   }, [createSession, currentId, selectSession, sessions, setSettingsOpen, settingsOpen, stop, streaming]);
 
+  useEffect(() => {
+    const onResize = () => {
+      const state = useAppStore.getState();
+      const next = clampInspectorWidth(state.inspectorWidth, state.sidebarCollapsed);
+      if (next !== state.inspectorWidth) state.setInspectorWidth(next);
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  const onHandlePointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDraggingInspector(true);
+    document.body.classList.add("is-col-resizing");
+  };
+
+  const onHandlePointerMove = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (!draggingInspector) return;
+    const right = shellRef.current?.getBoundingClientRect().right ?? window.innerWidth;
+    setInspectorWidth(clampInspectorWidth(right - event.clientX, sidebarCollapsed));
+  };
+
+  const endInspectorDrag = () => {
+    if (!draggingInspector) return;
+    setDraggingInspector(false);
+    document.body.classList.remove("is-col-resizing");
+    commitLayout();
+  };
+
   if (!ready) {
     return (
       <div className="flex h-full items-center justify-center text-[13px] text-mute">
@@ -72,10 +120,25 @@ export function AppShell() {
 
   return (
     <div className="flex h-full flex-col">
-      <div className="grid min-h-0 flex-1 grid-cols-[260px_minmax(0,1fr)_360px]">
+      <div ref={shellRef} className="flex min-h-0 flex-1">
         <SessionSidebar />
         <ChatPane />
-        <Inspector />
+        <button
+          type="button"
+          aria-label="Resize plugins panel"
+          title="Drag to resize"
+          className={`inspector-split ${draggingInspector ? "is-dragging" : ""}`}
+          onPointerDown={onHandlePointerDown}
+          onPointerMove={onHandlePointerMove}
+          onPointerUp={endInspectorDrag}
+          onPointerCancel={endInspectorDrag}
+        />
+        <div
+          className={`inspector-pane flex min-h-0 shrink-0 flex-col ${draggingInspector ? "is-dragging" : ""}`}
+          style={{ width: inspectorWidth }}
+        >
+          <Inspector />
+        </div>
       </div>
       <StatusBar />
       {settingsOpen ? <SettingsModal /> : null}

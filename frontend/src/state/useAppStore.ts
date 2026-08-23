@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type {
   ChatMessage,
   PluginDetail,
+  PluginKind,
   PluginSummary,
   ProviderConfig,
   RuntimeEvent,
@@ -43,11 +44,18 @@ export interface AppState {
   settingsOpen: boolean;
   streaming: boolean;
   streamError: string | null;
+  stopNotice: string | null;
   highlightMessageId: string | null;
   highlightTrajectoryId: string | null;
   selectedPluginId: string | null;
   sidebarWidth: number;
   inspectorWidth: number;
+  sidebarCollapsed: boolean;
+  collapsedPluginKinds: PluginKind[];
+  togglePluginKind: (kind: PluginKind) => void;
+  setSidebarCollapsed: (collapsed: boolean) => void;
+  setInspectorWidth: (width: number) => void;
+  commitLayout: () => void;
   hydrate: () => Promise<void>;
   refreshPlugins: () => Promise<void>;
   syncPlugins: () => Promise<void>;
@@ -93,6 +101,8 @@ function persistUi(get: () => AppState): void {
     inspectorTab: s.inspectorTab,
     sidebarWidth: s.sidebarWidth,
     inspectorWidth: s.inspectorWidth,
+    sidebarCollapsed: s.sidebarCollapsed,
+    collapsedPluginKinds: s.collapsedPluginKinds,
   };
   saveUiPrefs(prefs);
 }
@@ -207,11 +217,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   settingsOpen: false,
   streaming: false,
   streamError: null,
+  stopNotice: null,
   highlightMessageId: null,
   highlightTrajectoryId: null,
   selectedPluginId: null,
   sidebarWidth: 260,
   inspectorWidth: 360,
+  sidebarCollapsed: false,
+  collapsedPluginKinds: [],
 
   hydrate: async () => {
     const prefs = loadUiPrefs();
@@ -241,6 +254,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         inspectorTab: prefs.inspectorTab ?? "plugins",
         sidebarWidth: prefs.sidebarWidth ?? 260,
         inspectorWidth: prefs.inspectorWidth ?? 360,
+        sidebarCollapsed: prefs.sidebarCollapsed ?? (typeof window !== "undefined" && window.innerWidth < 900),
+        collapsedPluginKinds: prefs.collapsedPluginKinds ?? [],
       });
       persistUi(get);
       return;
@@ -262,6 +277,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       inspectorTab: prefs.inspectorTab ?? "plugins",
       sidebarWidth: prefs.sidebarWidth ?? 260,
       inspectorWidth: prefs.inspectorWidth ?? 360,
+      sidebarCollapsed: prefs.sidebarCollapsed ?? (typeof window !== "undefined" && window.innerWidth < 900),
+      collapsedPluginKinds: prefs.collapsedPluginKinds ?? [],
     });
     persistUi(get);
   },
@@ -291,7 +308,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const sessions = [metaOf(record), ...get().sessions];
     await saveSession(record);
     await saveSessionIndex(sessions);
-    set({ sessions, currentId: record.id, current: record, streamError: null });
+    set({ sessions, currentId: record.id, current: record, streamError: null, stopNotice: null });
     persistUi(get);
   },
 
@@ -299,7 +316,14 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (get().streaming) await get().stop();
     const record = await loadSession(id);
     if (!record) return;
-    set({ currentId: id, current: record, streamError: null, selectedPluginId: null, pluginDetail: null });
+    set({
+      currentId: id,
+      current: record,
+      streamError: null,
+      stopNotice: null,
+      selectedPluginId: null,
+      pluginDetail: null,
+    });
     persistUi(get);
   },
 
@@ -344,6 +368,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     persistUi(get);
   },
 
+  setSidebarCollapsed: (collapsed) => {
+    set({ sidebarCollapsed: collapsed });
+    persistUi(get);
+  },
+
+  setInspectorWidth: (width) => set({ inspectorWidth: width }),
+
+  commitLayout: () => persistUi(get),
+
   setSettingsOpen: (open) => set({ settingsOpen: open }),
 
   upsertProvider: (provider) => {
@@ -378,11 +411,25 @@ export const useAppStore = create<AppState>((set, get) => ({
     persistUi(get);
   },
 
+  togglePluginKind: (kind) => {
+    const current = get().collapsedPluginKinds;
+    const collapsedPluginKinds = current.includes(kind)
+      ? current.filter((item) => item !== kind)
+      : [...current, kind];
+    set({ collapsedPluginKinds });
+    persistUi(get);
+  },
+
   openPlugin: async (id) => {
-    set({ selectedPluginId: id, pluginDetail: null, pluginDetailError: null, inspectorTab: "plugins" });
+    const summary = get().plugins.find((p) => p.id === id);
+    set({
+      selectedPluginId: id,
+      pluginDetail: summary ?? null,
+      pluginDetailError: null,
+      inspectorTab: "plugins",
+    });
     persistUi(get);
     if (id.startsWith("client.")) {
-      const summary = get().plugins.find((p) => p.id === id);
       set({
         pluginDetail: summary
           ? {
@@ -399,8 +446,10 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     try {
       const detail = await fetchPlugin(id);
+      if (get().selectedPluginId !== id) return;
       set({ pluginDetail: detail });
     } catch (error) {
+      if (get().selectedPluginId !== id) return;
       set({ pluginDetailError: error instanceof Error ? error.message : String(error) });
     }
   },
@@ -455,11 +504,21 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   stop: async () => {
-    runGeneration += 1;
+    if (!get().streaming) return;
     const id = get().currentId;
-    runAbort?.abort();
     if (id) await stopRun(id).catch(() => undefined);
-    set({ streaming: false });
+    runGeneration += 1;
+    runAbort?.abort();
+    const notice = "Stopped by you — this run was aborted manually.";
+    const current = get().current;
+    if (!current) {
+      set({ streaming: false, streamError: null, stopNotice: notice });
+      return;
+    }
+    const next = withManualStop(current, notice);
+    const sessions = get().sessions.map((s) => (s.id === next.id ? metaOf(next) : s));
+    set({ current: next, sessions, streaming: false, streamError: null, stopNotice: notice });
+    await persistCurrent(next, sessions);
   },
 
   highlightMessage: (id) => {
@@ -491,6 +550,43 @@ let runAbort: AbortController | null = null;
 let runGeneration = 0;
 let flashSeq = 0;
 
+function withManualStop(record: SessionRecord, notice: string): SessionRecord {
+  const messages = record.messages.map((message) => {
+    if (!message.toolCalls?.some((call) => call.status === "running" || call.status === "pending")) {
+      return message;
+    }
+    return {
+      ...message,
+      toolCalls: message.toolCalls.map((call) =>
+        call.status === "running" || call.status === "pending"
+          ? { ...call, status: "aborted" as const, resultSnippet: "Stopped by you — tool aborted." }
+          : call,
+      ),
+    };
+  });
+  const already = record.trajectory.some(
+    (event) => event.type === "run_end" && event.title === "Manual stop",
+  );
+  const trajectory = already
+    ? record.trajectory
+    : [
+        ...record.trajectory,
+        stampEventRound(
+          {
+            id: uid("tr"),
+            type: "run_end",
+            ts: Date.now(),
+            runId: "client",
+            title: "Manual stop",
+            detail: notice,
+            payload: { source: "manual" },
+          },
+          messages,
+        ),
+      ];
+  return { ...record, messages, trajectory, updatedAt: Date.now() };
+}
+
 function truncateForRetry(record: SessionRecord, userIndex: number): SessionRecord {
   const user = record.messages[userIndex];
   if (!user) return record;
@@ -519,7 +615,7 @@ async function executeRun(
 ): Promise<void> {
   const seq = ++runGeneration;
   const sessions = get().sessions.map((s) => (s.id === seeded.id ? metaOf(seeded) : s));
-  set({ current: seeded, sessions, streaming: true, streamError: null });
+  set({ current: seeded, sessions, streaming: true, streamError: null, stopNotice: null });
   await persistCurrent(seeded, sessions);
 
   const provider = get().providers.find((p) => p.id === get().activeProviderId);
@@ -542,6 +638,7 @@ async function executeRun(
         set({ streamError: event.message });
       }
       live = applyEvent(live, event);
+      if (runGeneration !== seq) return;
       const nextSessions = get().sessions.map((s) => (s.id === live.id ? metaOf(live) : s));
       set({ current: live, sessions: nextSessions });
     }

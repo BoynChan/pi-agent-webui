@@ -30,7 +30,7 @@ export interface RegisteredSkill {
 export interface RegisteredPlugin {
   id: string;
   name: string;
-  kind: "scp" | "other";
+  kind: "mcp" | "scp" | "other";
   description: string;
   origin?: string;
   enabled?: boolean;
